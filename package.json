@@ -30,7 +30,15 @@
   },
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/nex-gen-tech/nexmemory-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nex-gen-tech/nexmemory-mcp/issues"
+  },
+  "homepage": "https://github.com/nex-gen-tech/nexmemory-mcp#readme",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "devDependencies": {
     "@changesets/cli": "^2.26.0",
