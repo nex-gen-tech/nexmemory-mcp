@@ -78,7 +78,7 @@ function log(message: string): void {
 const TOOLS: MCPTool[] = [
   {
     name: 'create_entity',
-    description: 'Create a new entity in the knowledge base with name, description, tags, and optional properties',
+    description: 'Create a new entity in the knowledge base with name, description, tags, optional properties, and optionally link it to a parent entity via a relationship',
     inputSchema: {
       type: 'object',
       properties: {
@@ -86,6 +86,16 @@ const TOOLS: MCPTool[] = [
         description: { type: 'string', description: 'A detailed description of the entity' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Array of tag names to categorize the entity' },
         properties: { type: 'object', description: 'Optional custom properties as key-value pairs' },
+        parent_id: { type: 'string', description: 'Optional UUID of parent entity to create a relationship from parent to this entity' },
+        relationship: {
+          type: 'object',
+          description: 'Optional relationship details when parent_id is provided',
+          properties: {
+            predicate: { type: 'string', description: 'Relationship type (e.g., "leads_to", "contains", "parent_of", "related_to")', default: 'related_to' },
+            bidirectional: { type: 'boolean', description: 'Whether the relationship is bidirectional', default: false },
+            properties: { type: 'object', description: 'Optional relationship-specific properties' },
+          },
+        },
       },
       required: ['name', 'tags'],
     },
@@ -151,6 +161,70 @@ const TOOLS: MCPTool[] = [
       required: ['query'],
     },
   },
+  {
+    name: 'create_relationship',
+    description: 'Create a relationship between two entities',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        source_id: { type: 'string', description: 'UUID of the source entity' },
+        target_id: { type: 'string', description: 'UUID of the target entity' },
+        predicate: { type: 'string', description: 'Relationship type (e.g., "leads_to", "contains", "parent_of")' },
+        bidirectional: { type: 'boolean', description: 'Whether the relationship is bidirectional', default: false },
+        properties: { type: 'object', description: 'Optional relationship-specific properties' },
+      },
+      required: ['source_id', 'target_id', 'predicate'],
+    },
+  },
+  {
+    name: 'get_relationship',
+    description: 'Retrieve a relationship by its ID',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The UUID of the relationship to retrieve' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'update_relationship',
+    description: 'Update an existing relationship',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The UUID of the relationship to update' },
+        source_id: { type: 'string', description: 'Updated source entity UUID' },
+        target_id: { type: 'string', description: 'Updated target entity UUID' },
+        predicate: { type: 'string', description: 'Updated relationship type' },
+        bidirectional: { type: 'boolean', description: 'Updated bidirectional flag' },
+        properties: { type: 'object', description: 'Updated relationship properties' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'delete_relationship',
+    description: 'Delete a relationship',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The UUID of the relationship to delete' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'list_entity_relationships',
+    description: 'List all relationships for a specific entity',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entity_id: { type: 'string', description: 'The UUID of the entity' },
+      },
+      required: ['entity_id'],
+    },
+  },
 ];
 
 // Helper to make HTTP request
@@ -199,6 +273,24 @@ async function callTool(toolName: string, arguments_: Record<string, unknown>): 
     switch (toolName) {
       case 'create_entity': {
         const createPath = `${basePath}/entities`;
+        // Build request body with optional parent_id and relationship
+        const requestBody: Record<string, unknown> = {
+          name: arguments_.name,
+          description: arguments_.description || '',
+          tags: arguments_.tags || [],
+          properties: arguments_.properties || {},
+        };
+
+        // Add parent_id if provided
+        if (arguments_.parent_id && typeof arguments_.parent_id === 'string') {
+          requestBody.parent_id = arguments_.parent_id;
+
+          // Add relationship details if provided
+          if (arguments_.relationship && typeof arguments_.relationship === 'object') {
+            requestBody.relationship = arguments_.relationship;
+          }
+        }
+
         const createOptions: HTTPOptions = {
           hostname,
           port,
@@ -207,14 +299,15 @@ async function callTool(toolName: string, arguments_: Record<string, unknown>): 
           headers,
           timeout: 30000,
         };
-        const response = await makeRequest(createOptions, JSON.stringify(arguments_));
-        if (response.status === 201) {
+        const response = await makeRequest(createOptions, JSON.stringify(requestBody));
+        if (response.status === 201 || response.status === 206) {
           const entity = JSON.parse(response.body);
+          const statusMsg = response.status === 206 ? ' (Entity created, but relationship may have issues)' : '';
           return {
             content: [
               {
                 type: 'text',
-                text: `Entity created successfully:\n${JSON.stringify(entity, null, 2)}`,
+                text: `Entity created successfully${statusMsg}:\n${JSON.stringify(entity, null, 2)}`,
               },
             ],
             isError: false,
@@ -382,6 +475,186 @@ async function callTool(toolName: string, arguments_: Record<string, unknown>): 
               {
                 type: 'text',
                 text: `Found ${result.count} results:\n${JSON.stringify(result.results, null, 2)}`,
+              },
+            ],
+            isError: false,
+          };
+        } else {
+          throw new Error(`HTTP ${response.status}: ${response.body}`);
+        }
+      }
+
+      case 'create_relationship': {
+        const { source_id, target_id, predicate, bidirectional, properties } = arguments_;
+        if (!source_id || typeof source_id !== 'string') {
+          throw new Error('source_id is required');
+        }
+        if (!target_id || typeof target_id !== 'string') {
+          throw new Error('target_id is required');
+        }
+        if (!predicate || typeof predicate !== 'string') {
+          throw new Error('predicate is required');
+        }
+        const relPath = `${basePath}/relationships`;
+        const relOptions: HTTPOptions = {
+          hostname,
+          port,
+          path: relPath,
+          method: 'POST',
+          headers,
+          timeout: 30000,
+        };
+        const relBody = {
+          source_id,
+          target_id,
+          predicate,
+          bidirectional: bidirectional || false,
+          properties: properties || {},
+        };
+        const response = await makeRequest(relOptions, JSON.stringify(relBody));
+        if (response.status === 201) {
+          const relationship = JSON.parse(response.body);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Relationship created successfully:\n${JSON.stringify(relationship, null, 2)}`,
+              },
+            ],
+            isError: false,
+          };
+        } else {
+          throw new Error(`HTTP ${response.status}: ${response.body}`);
+        }
+      }
+
+      case 'get_relationship': {
+        const id = arguments_.id;
+        if (!id || typeof id !== 'string') {
+          throw new Error('id is required');
+        }
+        const relPath = `${basePath}/relationships/${id}`;
+        const relOptions: HTTPOptions = {
+          hostname,
+          port,
+          path: relPath,
+          method: 'GET',
+          headers,
+          timeout: 30000,
+        };
+        const response = await makeRequest(relOptions);
+        if (response.status === 200) {
+          const relationship = JSON.parse(response.body);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(relationship, null, 2),
+              },
+            ],
+            isError: false,
+          };
+        } else if (response.status === 404) {
+          throw new Error(`Relationship not found: ${id}`);
+        } else {
+          throw new Error(`HTTP ${response.status}: ${response.body}`);
+        }
+      }
+
+      case 'update_relationship': {
+        const id = arguments_.id;
+        if (!id || typeof id !== 'string') {
+          throw new Error('id is required');
+        }
+        const { source_id, target_id, predicate, bidirectional, properties } = arguments_;
+        const relPath = `${basePath}/relationships/${id}`;
+        const relOptions: HTTPOptions = {
+          hostname,
+          port,
+          path: relPath,
+          method: 'PUT',
+          headers,
+          timeout: 30000,
+        };
+        const relBody: Record<string, unknown> = {};
+        if (source_id) relBody.source_id = source_id;
+        if (target_id) relBody.target_id = target_id;
+        if (predicate) relBody.predicate = predicate;
+        if (bidirectional !== undefined) relBody.bidirectional = bidirectional;
+        if (properties) relBody.properties = properties;
+        const response = await makeRequest(relOptions, JSON.stringify(relBody));
+        if (response.status === 200) {
+          const relationship = JSON.parse(response.body);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Relationship updated successfully:\n${JSON.stringify(relationship, null, 2)}`,
+              },
+            ],
+            isError: false,
+          };
+        } else if (response.status === 404) {
+          throw new Error(`Relationship not found: ${id}`);
+        } else {
+          throw new Error(`HTTP ${response.status}: ${response.body}`);
+        }
+      }
+
+      case 'delete_relationship': {
+        const id = arguments_.id;
+        if (!id || typeof id !== 'string') {
+          throw new Error('id is required');
+        }
+        const relPath = `${basePath}/relationships/${id}`;
+        const relOptions: HTTPOptions = {
+          hostname,
+          port,
+          path: relPath,
+          method: 'DELETE',
+          headers,
+          timeout: 30000,
+        };
+        const response = await makeRequest(relOptions);
+        if (response.status === 204 || response.status === 200) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Relationship ${id} deleted successfully`,
+              },
+            ],
+            isError: false,
+          };
+        } else if (response.status === 404) {
+          throw new Error(`Relationship not found: ${id}`);
+        } else {
+          throw new Error(`HTTP ${response.status}: ${response.body}`);
+        }
+      }
+
+      case 'list_entity_relationships': {
+        const entity_id = arguments_.entity_id;
+        if (!entity_id || typeof entity_id !== 'string') {
+          throw new Error('entity_id is required');
+        }
+        const relPath = `${basePath}/entities/${entity_id}/relationships`;
+        const relOptions: HTTPOptions = {
+          hostname,
+          port,
+          path: relPath,
+          method: 'GET',
+          headers,
+          timeout: 30000,
+        };
+        const response = await makeRequest(relOptions);
+        if (response.status === 200) {
+          const relationships = JSON.parse(response.body);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Found ${Array.isArray(relationships) ? relationships.length : 0} relationships:\n${JSON.stringify(relationships, null, 2)}`,
               },
             ],
             isError: false,
@@ -561,4 +834,3 @@ process.on('SIGTERM', () => {
   log('Received SIGTERM, shutting down');
   process.exit(0);
 });
-
